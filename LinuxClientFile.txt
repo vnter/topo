@@ -1,0 +1,198 @@
+#include <winsock2.h>
+#include <stdio.h>
+#include <stdlib.h>
+
+#include <sys/types.h>
+
+#include <sys/socket.h>
+
+#include <sys/un.h>
+
+#include <netinet/in.h>
+
+#include <arpa/inet.h>
+
+#include <unistd.h>
+
+
+//将一个无符号数转换成相应的字符串ip地址
+void get_ip_address(unsigned long address,char *ip)
+{
+	sprintf(ip,"%d.%d.%d.%d",address>>24,(address<<8)>>24,(address<<16)>>24,(address<<24)>>24);
+}
+
+//通过一个新建的socket利用缓冲区buffer向客户端传递文件，文件描述符是fp，是一个已经打开的文件
+void send_file(char *buffer,SOCKET NewConnection,FILE *fp)
+{	
+	int read_length=0;
+
+	//while(fgets(buffer,1000,fp)!=NULL)//这种方法经过多次测试发现不行，原因就是不能返回读取的大小
+	while((read_length=fread(buffer,1,1000,fp))>0)
+	{
+		//int len=strlen(buffer);
+		int len=read_length;
+		int sended=0;
+		int count;
+
+		while(len>0)
+		{
+			count=send(NewConnection,buffer+sended,len,0);
+			len-=count;
+			sended+=count;
+		}
+		buffer[read_length]='\0';
+	}
+
+	fclose(fp);
+	printf("succeed to transfer file\n\n");
+}
+
+
+void main(int argc,char* argv[])
+{
+	WSADATA              wsaData;
+	SOCKET               ListeningSocket;
+	SOCKET               NewConnection;
+	SOCKADDR_IN          ServerAddr;
+	SOCKADDR_IN          ClientAddr;
+	int                  Port = 12345;
+	char 				 path[100];
+
+	// 初始化Windows Socket 2.2
+	WSAStartup(MAKEWORD(2,2), &wsaData);
+	//printf("MTU is %d\n",wsaData.iMaxUdpDg);
+
+	// 创建一个新的Socket来响应客户端的连接请求
+	ListeningSocket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+
+	// 填写服务器地址信息
+	// 端口为5150
+	// IP地址为INADDR_ANY，注意使用htonl将IP地址转换为网络格式
+	ServerAddr.sin_family = AF_INET;
+	if(argc==2)//在命令行中输入端口号
+		ServerAddr.sin_port=htons(atoi(argv[1]));
+	else
+		ServerAddr.sin_port = htons(Port);    
+	ServerAddr.sin_addr.s_addr = htonl(INADDR_ANY);
+
+	// 绑定监听端口
+	bind(ListeningSocket, (SOCKADDR *)&ServerAddr, sizeof(ServerAddr));
+
+	// 开始监听，指定最大同时连接数为5
+	listen(ListeningSocket, 5); 
+	printf("start to receive connection\n");
+	while(1)
+	{
+		FILE *fp;
+		char ip_address[16];
+		char state;
+		int ClientAddrLen=sizeof(ClientAddr);
+		// 接受新的连接
+		NewConnection = accept(ListeningSocket, (SOCKADDR *) &ClientAddr,&ClientAddrLen);
+		printf("get a connection from %s\n",ip_address);
+
+		recv(NewConnection,&state,1,0);
+		if(state=='1')
+		{
+			recv(NewConnection,path,100,0);
+			printf("client wants to receive file %s\n",path);
+			fp=fopen(path,"rb");
+			if(fp==NULL)
+			{
+				printf("open file failed!\n");
+				send(NewConnection,"0",1,0);
+			}
+			else
+			{						
+				printf("open file %s success\n",path);
+				send(NewConnection,"1",1,0);
+
+				//获取客户端状况，是否成功创建文件，如果成功创建，服务器端就可以传送
+				recv(NewConnection,&state,1,0);
+				if(state=='1')
+				{
+					char buffer[1000]="";
+					int length;				
+					char l[10];
+
+					printf("start to transfer\n");
+					//向客户端发送文件长度
+					fseek(fp,0,SEEK_END);//将文件指针移到文件末尾
+					length=ftell(fp);	//获取文件长度	
+					printf("file length is %d\n",length);
+					itoa(length,l,10);	//将数字转换为字符串	
+
+					send(NewConnection,l,strlen(l),0);
+					fseek(fp,0,SEEK_SET);//重新将文件指针移动到文件开头
+
+					//发送文件
+					send_file(buffer,NewConnection,fp);
+				}
+				else
+				{
+					printf("client cancelled the transfer!\n");
+					fclose(fp);
+				}
+			}
+		}
+		else
+		{
+			char file_name[50];
+			char directory[100]="d:/download/";
+			recv(NewConnection,file_name,100,0);
+			printf("client wants to send file %s\n",file_name);
+
+			fp=fopen(strcat(directory,file_name),"wb");
+			if(fp==NULL)//服务器创建文件失败，拒绝接收客户端的文件
+			{
+				printf("create file failed!\n");
+				send(NewConnection,"0",1,0);
+			}
+			else
+			{	
+				printf("create file success!\n");
+				send(NewConnection,"1",1,0);
+
+				recv(NewConnection,&state,1,0);
+				if(state=='1')
+				{
+					char buffer[1000];
+					char char_len[10];
+					int length;		
+					int read_length;
+					int finished=0;
+
+					read_length=recv(NewConnection,char_len,10,0);
+					//printf("read string is %s\n",char_len);
+					printf("read length is %d,received file length is %d\n",read_length,atoi(char_len));
+
+					while((read_length=recv(NewConnection,buffer,1000,0))>0)  
+					{                
+						finished+=read_length;  
+						//printf("length is %d\n",read_length);
+						//buffer[read_length]='\0';               
+						fwrite(buffer,1,read_length,fp);  											
+					}        
+					fclose(fp);          
+					printf("read length is %d\n",finished);     
+					printf("succeed to receive the file,find the file in d://download\n\n");
+				}
+				else
+				{
+					printf("client open file failed!\n");
+					fclose(fp);
+					//删除该文件
+					remove(strcat(directory,file_name));
+				}
+			}
+		}
+
+		// 新的连接建立后，就可以互相通信了，在这个简单的例子中，我们直接关闭连接，
+		// 并关闭监听Socket，然后退出应用程序
+		closesocket(NewConnection);
+	}
+	closesocket(ListeningSocket);
+	// 释放Windows Socket DLL的相关资源
+
+	WSACleanup();
+}
